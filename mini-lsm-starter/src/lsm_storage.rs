@@ -1,6 +1,5 @@
 // Copyright (c) 2022-2025 Alex Chi Z
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
+// // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
@@ -21,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Ok, Result};
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -297,6 +296,17 @@ impl LsmStorageInner {
         if let Some(v) = self.state.read().as_ref().memtable.get(_key) {
             if v.len() != 0 {
                 return Ok(Some(v));
+            } else {
+                return Ok(None);
+            }
+        }
+        for old_memtable in self.state.read().as_ref().imm_memtables.iter() {
+            if let Some(v) = old_memtable.get(_key) {
+                if v.len() != 0 {
+                    return Ok(Some(v));
+                } else {
+                    return Ok(None);
+                }
             }
         }
         Ok(None)
@@ -309,7 +319,15 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        self.state.read().as_ref().memtable.put(_key, _value)
+        let state = self.state.read();
+        state.memtable.put(_key, _value)?;
+        if state.memtable.approximate_size() > self.options.target_sst_size {
+            let lock = &self.state_lock.lock();
+            if state.memtable.approximate_size() > self.options.target_sst_size {
+                self.force_freeze_memtable(lock)?;
+            }
+        }
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
@@ -339,7 +357,14 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        let memtable = Arc::new(MemTable::create(self.next_sst_id()));
+        {
+            let mut state = self.state.write();
+            let snapshot = Arc::make_mut(&mut state);
+            let old_memtable = std::mem::replace(&mut snapshot.memtable, memtable);
+            snapshot.imm_memtables.insert(0, old_memtable);
+        }
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
