@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use anyhow::{Ok, Result};
 use bytes::Bytes;
+use clap::builder::FalseyValueParser;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::block::Block;
@@ -29,9 +30,10 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::MemTable;
+use crate::mem_table::{MemTable, MemTableIterator};
 use crate::mvcc::LsmMvccInner;
 use crate::table::SsTable;
 
@@ -322,9 +324,10 @@ impl LsmStorageInner {
         let state = self.state.read();
         state.memtable.put(_key, _value)?;
         if state.memtable.approximate_size() > self.options.target_sst_size {
-            let lock = &self.state_lock.lock();
+            let lock = self.state_lock.lock();
             if state.memtable.approximate_size() > self.options.target_sst_size {
-                self.force_freeze_memtable(lock)?;
+                drop(state);
+                self.force_freeze_memtable(&lock)?;
             }
         }
         Ok(())
@@ -332,7 +335,16 @@ impl LsmStorageInner {
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        self.state.read().as_ref().memtable.put(_key, &Bytes::new())
+        let state = self.state.read();
+        state.memtable.put(_key, b"")?;
+        if state.memtable.approximate_size() > self.options.target_sst_size {
+            let lock = self.state_lock.lock();
+            if state.memtable.approximate_size() > self.options.target_sst_size {
+                drop(state);
+                self.force_freeze_memtable(&lock)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -383,6 +395,22 @@ impl LsmStorageInner {
         _lower: Bound<&[u8]>,
         _upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let state = self.state.read();
+        let mut iters: Vec<Box<MemTableIterator>> =
+            Vec::with_capacity(state.imm_memtables.len() + 1);
+
+        iters.push(Box::new(state.memtable.scan(_lower, _upper)));
+
+        for memtable in state.imm_memtables.iter() {
+            iters.push(Box::new(memtable.scan(_lower, _upper)));
+        }
+
+        let merge_iterator = MergeIterator::create(iters);
+
+        let lsm_iterator = LsmIterator::new(merge_iterator)?;
+
+        let fused_iterator = FusedIterator::new(lsm_iterator);
+
+        Ok(fused_iterator)
     }
 }
