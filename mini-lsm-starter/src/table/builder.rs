@@ -61,7 +61,7 @@ impl SsTableBuilder {
             return;
         }
         self.finish_block();
-        self.builder.add(key, value);
+        assert!(self.builder.add(key, value));
         self.first_key.extend(key.raw_ref());
         self.last_key.extend(key.raw_ref());
     }
