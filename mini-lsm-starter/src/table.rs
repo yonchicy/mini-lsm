@@ -73,9 +73,9 @@ impl BlockMeta {
         for meta in block_meta {
             buf.put_u32(meta.offset as u32);
             buf.put_u16(meta.first_key.len() as u16);
-            buf.put_slice(&meta.first_key.raw_ref());
+            buf.put_slice(meta.first_key.raw_ref());
             buf.put_u16(meta.last_key.len() as u16);
-            buf.put_slice(&meta.last_key.raw_ref());
+            buf.put_slice(meta.last_key.raw_ref());
         }
         assert_eq!(estimated_size, buf.len() - original_len);
     }

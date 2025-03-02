@@ -38,10 +38,8 @@ impl<
         Ok(it)
     }
     fn skip_b(&mut self) -> Result<()> {
-        if self.a.is_valid() {
-            if self.b.is_valid() && self.a.key() == self.b.key() {
-                self.b.next()?;
-            }
+        if self.a.is_valid() && self.b.is_valid() && self.a.key() == self.b.key() {
+            self.b.next()?;
         }
         Ok(())
     }
@@ -95,5 +93,8 @@ impl<
         }
         self.skip_b()?;
         Ok(())
+    }
+    fn num_active_iterators(&self) -> usize {
+        self.a.num_active_iterators() + self.b.num_active_iterators()
     }
 }
