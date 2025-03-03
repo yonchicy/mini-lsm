@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use anyhow::{Ok, Result};
 use bytes::Bytes;
+use farmhash::fingerprint32;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::block::Block;
@@ -330,9 +331,25 @@ impl LsmStorageInner {
         let mut sst_iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for sst_table in snapshot.l0_sstables.iter() {
             let sst = snapshot.sstables.get(sst_table).unwrap().clone();
-            let sst_iterator =
-                SsTableIterator::create_and_seek_to_key(sst, KeySlice::from_slice(_key))?;
-            sst_iters.push(Box::new(sst_iterator));
+            if Self::key_within(
+                _key,
+                sst.first_key().as_key_slice(),
+                sst.last_key().as_key_slice(),
+            ) {
+                if let Some(bloom) = &sst.bloom {
+                    if bloom.may_contain(fingerprint32(_key)) {
+                        let sst_iterator = SsTableIterator::create_and_seek_to_key(
+                            sst,
+                            KeySlice::from_slice(_key),
+                        )?;
+                        sst_iters.push(Box::new(sst_iterator));
+                    }
+                } else {
+                    let sst_iterator =
+                        SsTableIterator::create_and_seek_to_key(sst, KeySlice::from_slice(_key))?;
+                    sst_iters.push(Box::new(sst_iterator));
+                }
+            }
         }
         let merge_iterator = MergeIterator::create(sst_iters);
         if merge_iterator.is_valid()
@@ -444,6 +461,10 @@ impl LsmStorageInner {
         // no-op
         Ok(())
     }
+    fn key_within(user_key: &[u8], table_begin: KeySlice, table_end: KeySlice) -> bool {
+        table_begin.raw_ref() <= user_key && user_key <= table_end.raw_ref()
+    }
+
     fn range_overlap(
         user_begin: Bound<&[u8]>,
         user_end: Bound<&[u8]>,

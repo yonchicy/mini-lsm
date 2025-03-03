@@ -161,15 +161,21 @@ impl SsTable {
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
         let file_len = file.size();
-        let raw_offset = file.read(
+        let raw_bloom_offset = file.read(
             file_len - std::mem::size_of::<u32>() as u64,
             std::mem::size_of::<u32>() as u64,
         )?;
-        let block_offset = (&raw_offset[..]).get_u32() as u64;
-        let raw_block_meta = file.read(
-            block_offset,
-            file_len - block_offset - std::mem::size_of::<u32>() as u64,
+        let bloom_offset = (&raw_bloom_offset[..]).get_u32() as u64;
+        let raw_bloom_data = file.read(
+            bloom_offset,
+            file_len - bloom_offset - std::mem::size_of::<u32>() as u64,
         )?;
+        let bloom = Bloom::decode(&raw_bloom_data)?;
+
+        let raw_meta_offset = file.read(bloom_offset - 4, 4)?;
+
+        let meta_offset = (&raw_meta_offset[..]).get_u32() as u64;
+        let raw_block_meta = file.read(meta_offset, bloom_offset - meta_offset - 4)?;
 
         let block_meta = BlockMeta::decode_block_meta(raw_block_meta.as_slice());
         let sstable = Self {
@@ -177,10 +183,10 @@ impl SsTable {
             first_key: block_meta.first().unwrap().first_key.clone(),
             last_key: block_meta.last().unwrap().last_key.clone(),
             block_meta,
-            block_meta_offset: block_offset as usize,
+            block_meta_offset: meta_offset as usize,
             id,
             block_cache,
-            bloom: None,
+            bloom: Some(bloom),
             max_ts: 0,
         };
         Ok(sstable)

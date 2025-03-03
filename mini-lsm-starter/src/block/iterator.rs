@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use bytes::Buf;
+use nom::{combinator::rest, ExtendInto};
 
 use crate::key::{KeySlice, KeyVec};
 
@@ -40,6 +41,7 @@ pub struct BlockIterator {
 impl Block {
     fn get_first_key(&self) -> KeyVec {
         let mut buf = &self.data[..];
+        buf.get_u16();
         let key_len = buf.get_u16() as usize;
         let key = &buf[..key_len];
         KeyVec::from_vec(key.to_vec())
@@ -105,13 +107,18 @@ impl BlockIterator {
         let block = &self.block;
         let mut entry = &block.data[offset..];
 
+        let over_lap_size = entry.get_u16() as usize;
         let key_len = entry.get_u16() as usize;
-        let key = entry[..key_len].to_vec();
-        self.key = KeyVec::from_vec(key);
+        let rest_key = entry[..key_len].to_vec();
         entry.advance(key_len);
 
+        let key = &self.first_key.raw_ref()[..over_lap_size];
+        self.key.clear();
+        self.key.append(key);
+        self.key.append(&rest_key);
+
         let value_len = entry.get_u16() as usize;
-        let value_offset_begin = offset + 2 * std::mem::size_of::<u16>() + key_len;
+        let value_offset_begin = offset + 3 * std::mem::size_of::<u16>() + key_len;
         let value_offset_end = value_offset_begin + value_len;
         self.value_range = (value_offset_begin, value_offset_end);
     }
