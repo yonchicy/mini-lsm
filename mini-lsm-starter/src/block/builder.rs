@@ -47,7 +47,7 @@ fn compute_overlap(first_key: &KeyVec, key: &KeySlice) -> usize {
         }
         i += 1;
     }
-    return i;
+    i
 }
 
 impl BlockBuilder {
