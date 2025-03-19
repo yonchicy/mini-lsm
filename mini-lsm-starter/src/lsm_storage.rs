@@ -15,6 +15,7 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
@@ -39,7 +40,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::{map_bound, MemTable, MemTableIterator};
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
+use crate::table::{self, SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -65,6 +66,16 @@ pub enum WriteBatchRecord<T: AsRef<[u8]>> {
 }
 
 impl LsmStorageState {
+    pub fn dump_structure(&self) {
+        println!("lsm storage state dumping");
+        if !self.l0_sstables.is_empty() {
+            println!("L0 ({}): {:?}", self.l0_sstables.len(), self.l0_sstables,);
+        }
+        for (level, files) in &self.levels {
+            println!("L{level} ({}): {:?}", files.len(), files);
+        }
+    }
+
     fn create(options: &LsmStorageOptions) -> Self {
         let levels = match &options.compaction_options {
             CompactionOptions::Leveled(LeveledCompactionOptions { max_levels, .. })
@@ -352,18 +363,20 @@ impl LsmStorageInner {
             }
         }
         let l0_iterator = MergeIterator::create(sst_iters);
+        let mut levels_concat_iters = Vec::new();
+        for level in snapshot.levels.iter() {
+            let ssts_id = level.1.clone();
+            let ssts = ssts_id
+                .iter()
+                .map(|x| snapshot.sstables.get(x).unwrap().clone())
+                .collect::<Vec<_>>();
 
-        let mut l1_ssts = Vec::with_capacity(snapshot.levels[0].1.len());
-        for table in snapshot.levels[0].1.iter() {
-            let table = snapshot.sstables[table].clone();
-            if keep_table(_key, &table) {
-                l1_ssts.push(table);
-            }
+            let iter = SstConcatIterator::create_and_seek_to_key(ssts, KeySlice::from_slice(_key))?;
+            levels_concat_iters.push(Box::new(iter));
         }
-        let l1_iter =
-            SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(_key))?;
 
-        let iter = TwoMergeIterator::create(l0_iterator, l1_iter)?;
+        let iter =
+            TwoMergeIterator::create(l0_iterator, MergeIterator::create(levels_concat_iters))?;
 
         if iter.is_valid() && iter.key().raw_ref() == _key && !iter.value().is_empty() {
             return Ok(Some(Bytes::copy_from_slice(iter.value())));
@@ -378,10 +391,14 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        let state = self.state.read();
-        state.memtable.put(_key, _value)?;
-        if state.memtable.approximate_size() > self.options.target_sst_size {
+        let size = {
+            let state = self.state.read();
+            state.memtable.put(_key, _value)?;
+            state.memtable.approximate_size()
+        };
+        if size > self.options.target_sst_size {
             let lock = self.state_lock.lock();
+            let state = self.state.read();
             if state.memtable.approximate_size() > self.options.target_sst_size {
                 drop(state);
                 self.force_freeze_memtable(&lock)?;
@@ -421,7 +438,8 @@ impl LsmStorageInner {
     }
 
     pub(super) fn sync_dir(&self) -> Result<()> {
-        unimplemented!()
+        File::open(&self.path)?.sync_all()?;
+        Ok(())
     }
 
     /// Force freeze the current memtable to an immutable memtable
@@ -439,6 +457,7 @@ impl LsmStorageInner {
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
         let _state_lock = self.state_lock.lock();
+        println!("get state_lock in flush");
         let imm_memtable = {
             let guard = self.state.read();
             guard
@@ -465,6 +484,7 @@ impl LsmStorageInner {
             snapshot.sstables.insert(sst_id, sst);
             *guard = Arc::new(snapshot);
         }
+        self.sync_dir()?;
         Ok(())
     }
 
@@ -555,35 +575,39 @@ impl LsmStorageInner {
         let l0_sstable_iter = MergeIterator::create(l0_sstable_iters);
         let mem_l0_iter = TwoMergeIterator::create(mem_iterator, l0_sstable_iter)?;
 
-        let mut l1_ssts = Vec::with_capacity(snapshot.levels[0].1.len());
-        for table in snapshot.levels[0].1.iter() {
-            let table = snapshot.sstables[table].clone();
-            if Self::range_overlap(
-                _lower,
-                _upper,
-                table.first_key().raw_ref(),
-                table.last_key().raw_ref(),
-            ) {
-                l1_ssts.push(table);
+        let mut levels_concat_iters = Vec::new();
+        for level in snapshot.levels.iter() {
+            let mut ssts = Vec::with_capacity(level.1.len());
+            for sst_id in level.1.iter() {
+                let table = snapshot.sstables.get(sst_id).unwrap().clone();
+                if Self::range_overlap(
+                    _lower,
+                    _upper,
+                    table.first_key().raw_ref(),
+                    table.last_key().raw_ref(),
+                ) {
+                    ssts.push(table);
+                }
             }
+            let level_iter = match _lower {
+                Bound::Included(key) => {
+                    SstConcatIterator::create_and_seek_to_key(ssts, KeySlice::from_slice(key))?
+                }
+                Bound::Excluded(key) => {
+                    let mut iter =
+                        SstConcatIterator::create_and_seek_to_key(ssts, KeySlice::from_slice(key))?;
+                    if iter.is_valid() && iter.key().raw_ref() == key {
+                        iter.next()?;
+                    }
+                    iter
+                }
+                Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(ssts)?,
+            };
+            levels_concat_iters.push(Box::new(level_iter));
         }
 
-        let l1_iter = match _lower {
-            Bound::Included(key) => {
-                SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?
-            }
-            Bound::Excluded(key) => {
-                let mut iter =
-                    SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?;
-                if iter.is_valid() && iter.key().raw_ref() == key {
-                    iter.next()?;
-                }
-                iter
-            }
-            Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(l1_ssts)?,
-        };
-
-        let lsm_iter_inner = TwoMergeIterator::create(mem_l0_iter, l1_iter)?;
+        let lsm_iter_inner =
+            TwoMergeIterator::create(mem_l0_iter, MergeIterator::create(levels_concat_iters))?;
         let lsm_iterator = LsmIterator::new(lsm_iter_inner, map_bound(_upper))?;
 
         let fused_iterator = FusedIterator::new(lsm_iterator);

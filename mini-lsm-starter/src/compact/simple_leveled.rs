@@ -12,9 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::{collections::HashSet, sync::Arc};
+
 use serde::{Deserialize, Serialize};
 
-use crate::lsm_storage::LsmStorageState;
+use crate::{
+    iterators::{
+        concat_iterator::SstConcatIterator,
+        merge_iterator::MergeIterator,
+        two_merge_iterator::{self, TwoMergeIterator},
+    },
+    lsm_storage::LsmStorageState,
+    table::{SsTable, SsTableIterator},
+};
 
 #[derive(Debug, Clone)]
 pub struct SimpleLeveledCompactionOptions {
@@ -49,7 +59,48 @@ impl SimpleLeveledCompactionController {
         &self,
         _snapshot: &LsmStorageState,
     ) -> Option<SimpleLeveledCompactionTask> {
-        unimplemented!()
+        if _snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
+            println!(
+                "compaction triggered at level 0 because L0 has {} SSTs >= {}",
+                _snapshot.l0_sstables.len(),
+                self.options.level0_file_num_compaction_trigger
+            );
+            let lower_level = 1;
+            let upper_level_sst_ids = _snapshot.l0_sstables.clone();
+            let lower_level_sst_ids = _snapshot.levels.get(lower_level - 1).unwrap().clone();
+            assert!(lower_level_sst_ids.0 == lower_level);
+            let is_lower_level_bottom_level = false;
+            return Some(SimpleLeveledCompactionTask {
+                upper_level: None,
+                upper_level_sst_ids,
+                lower_level,
+                lower_level_sst_ids: lower_level_sst_ids.1.clone(),
+                is_lower_level_bottom_level,
+            });
+        }
+        for i in 1..self.options.max_levels {
+            let level = i;
+            let upper_level_len = _snapshot.levels.get(level - 1).unwrap().1.len();
+            let low_level_len = _snapshot.levels.get(level).unwrap().1.len();
+            let size_ratio = low_level_len as f64 / upper_level_len as f64;
+            if size_ratio < self.options.size_ratio_percent as f64 / 100.0 {
+                println!(
+                    "compaction triggered at level {} and {} with size ratio {}",
+                    i,
+                    level + 1,
+                    size_ratio
+                );
+                return Some(SimpleLeveledCompactionTask {
+                    upper_level: Some(level),
+                    upper_level_sst_ids: _snapshot.levels.get(level - 1).unwrap().1.clone(),
+                    lower_level: level + 1,
+                    lower_level_sst_ids: _snapshot.levels.get(level).unwrap().1.clone(),
+                    is_lower_level_bottom_level: level + 1 == self.options.max_levels,
+                });
+            }
+        }
+
+        None
     }
 
     /// Apply the compaction result.
@@ -65,6 +116,56 @@ impl SimpleLeveledCompactionController {
         _task: &SimpleLeveledCompactionTask,
         _output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
-        unimplemented!()
+        // let lower_tables:Vec<Arc<SsTable>>  = _task.lower_level_sst_ids.iter().map(|x| _snapshot.sstables.get(x).unwrap().clone()).collect() ;
+        // let upper_tables :Vec<Arc<SsTable>>  = _task.upper_level_sst_ids.iter().map(|x| _snapshot.sstables.get(x).unwrap().clone()).collect() ;
+
+        // let merge_sst = |two_merge_iterator:| {
+
+        // }
+
+        // let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_tables)?;
+        // if let Some(upper_level) = _task.upper_level {
+        //     let upper_iter = SstConcatIterator::create_and_seek_to_first(upper_tables)?;
+        //     let two_merge_iterator = TwoMergeIterator::create(upper_iter, lower_iter)?;
+        // } else {
+        //     let iters = upper_tables.iter().map(|x| Box::new(SsTableIterator::create_and_seek_to_first(x.clone())?)).collect::<Vec<_>>();
+        //     let upper_iter = MergeIterator::create(iters);
+        //     let two_merge_iterator = TwoMergeIterator::create(upper_iter, lower_iter)?;
+        // }
+
+        let mut dels = Vec::new();
+        let mut snapshot = _snapshot.clone();
+        if let Some(upper_level) = _task.upper_level {
+            assert_eq!(
+                _task.upper_level_sst_ids,
+                snapshot.levels.get(upper_level - 1).unwrap().1,
+                "sst mismatch"
+            );
+            dels.extend(&_task.upper_level_sst_ids);
+            snapshot.levels[upper_level - 1].1.clear();
+        } else {
+            let mut upper_level_tables = _task
+                .upper_level_sst_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            println!("{:?}", upper_level_tables);
+            snapshot.l0_sstables = snapshot
+                .l0_sstables
+                .iter()
+                .filter(|x| !upper_level_tables.remove(x))
+                .copied()
+                .collect::<Vec<_>>();
+            assert!(upper_level_tables.is_empty());
+            dels.extend(&_task.upper_level_sst_ids);
+        }
+        assert_eq!(
+            _task.lower_level_sst_ids,
+            snapshot.levels[_task.lower_level - 1].1,
+            "sst mismatch"
+        );
+        dels.extend(&_task.lower_level_sst_ids);
+        snapshot.levels[_task.lower_level - 1].1 = _output.to_vec();
+        (snapshot, dels)
     }
 }
