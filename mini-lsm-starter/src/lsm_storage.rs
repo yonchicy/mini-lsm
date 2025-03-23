@@ -363,13 +363,14 @@ impl LsmStorageInner {
         }
         let l0_iterator = MergeIterator::create(sst_iters);
         let mut levels_concat_iters = Vec::new();
-        for level in snapshot.levels.iter() {
-            let ssts_id = level.1.clone();
-            let ssts = ssts_id
-                .iter()
-                .map(|x| snapshot.sstables.get(x).unwrap().clone())
-                .collect::<Vec<_>>();
-
+        for (_, level_tables) in snapshot.levels.iter() {
+            let mut ssts = Vec::new();
+            for sst_id in level_tables {
+                let table = snapshot.sstables.get(sst_id).unwrap().clone();
+                if keep_table(_key, &table) {
+                    ssts.push(table);
+                }
+            }
             let iter = SstConcatIterator::create_and_seek_to_key(ssts, KeySlice::from_slice(_key))?;
             levels_concat_iters.push(Box::new(iter));
         }
@@ -578,7 +579,7 @@ impl LsmStorageInner {
         let l0_sstable_iter = MergeIterator::create(l0_sstable_iters);
         let mem_l0_iter = TwoMergeIterator::create(mem_iterator, l0_sstable_iter)?;
 
-        let mut levels_concat_iters = Vec::new();
+        let mut levels_concat_iters = Vec::with_capacity(snapshot.levels.len());
         for level in snapshot.levels.iter() {
             let mut ssts = Vec::with_capacity(level.1.len());
             for sst_id in level.1.iter() {
