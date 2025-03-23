@@ -25,7 +25,6 @@ use crate::{
         concat_iterator::SstConcatIterator, merge_iterator::MergeIterator,
         two_merge_iterator::TwoMergeIterator, StorageIterator,
     },
-    key::Key,
     mem_table::MemTableIterator,
     table::SsTableIterator,
 };

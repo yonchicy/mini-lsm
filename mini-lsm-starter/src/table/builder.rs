@@ -15,8 +15,8 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use crate::key::KeyVec;
+use std::path::Path;
 use std::sync::Arc;
-use std::{mem, path::Path};
 
 use anyhow::{Ok, Result};
 use bytes::BufMut;
@@ -60,7 +60,7 @@ impl SsTableBuilder {
             self.first_key.extend(key.raw_ref());
         }
 
-        self.key_hash.push(fingerprint32(&key.raw_ref()));
+        self.key_hash.push(fingerprint32(key.raw_ref()));
 
         if self.builder.add(key, value) {
             self.last_key.clear();

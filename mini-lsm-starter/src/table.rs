@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 pub use builder::SsTableBuilder;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut};
 pub use iterator::SsTableIterator;
 
 use crate::block::Block;

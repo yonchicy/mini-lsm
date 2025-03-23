@@ -15,9 +15,9 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use std::{ptr::addr_eq, sync::Arc, thread::current};
+use std::sync::Arc;
 
-use anyhow::{anyhow, Ok, Result};
+use anyhow::{Ok, Result};
 
 use super::StorageIterator;
 use crate::{
@@ -90,7 +90,6 @@ impl SstConcatIterator {
 
     pub fn create_and_seek_to_key(sstables: Vec<Arc<SsTable>>, key: KeySlice) -> Result<Self> {
         Self::check_sst_valid(&sstables);
-        let mut next_sst_idx = 0;
         let idx = sstables
             .partition_point(|x| x.first_key().raw_ref() <= key.raw_ref())
             .saturating_sub(1);

@@ -12,19 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    iterators::{
-        concat_iterator::SstConcatIterator,
-        merge_iterator::MergeIterator,
-        two_merge_iterator::{self, TwoMergeIterator},
-    },
-    lsm_storage::LsmStorageState,
-    table::{SsTable, SsTableIterator},
-};
+use crate::lsm_storage::LsmStorageState;
 
 #[derive(Debug, Clone)]
 pub struct SimpleLeveledCompactionOptions {
@@ -116,23 +108,6 @@ impl SimpleLeveledCompactionController {
         _task: &SimpleLeveledCompactionTask,
         _output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
-        // let lower_tables:Vec<Arc<SsTable>>  = _task.lower_level_sst_ids.iter().map(|x| _snapshot.sstables.get(x).unwrap().clone()).collect() ;
-        // let upper_tables :Vec<Arc<SsTable>>  = _task.upper_level_sst_ids.iter().map(|x| _snapshot.sstables.get(x).unwrap().clone()).collect() ;
-
-        // let merge_sst = |two_merge_iterator:| {
-
-        // }
-
-        // let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_tables)?;
-        // if let Some(upper_level) = _task.upper_level {
-        //     let upper_iter = SstConcatIterator::create_and_seek_to_first(upper_tables)?;
-        //     let two_merge_iterator = TwoMergeIterator::create(upper_iter, lower_iter)?;
-        // } else {
-        //     let iters = upper_tables.iter().map(|x| Box::new(SsTableIterator::create_and_seek_to_first(x.clone())?)).collect::<Vec<_>>();
-        //     let upper_iter = MergeIterator::create(iters);
-        //     let two_merge_iterator = TwoMergeIterator::create(upper_iter, lower_iter)?;
-        // }
-
         let mut dels = Vec::new();
         let mut snapshot = _snapshot.clone();
         if let Some(upper_level) = _task.upper_level {

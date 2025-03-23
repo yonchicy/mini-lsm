@@ -36,10 +36,9 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
-use crate::iterators::{merge_iterator, two_merge_iterator};
 use crate::key::KeySlice;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
-use crate::table::{self, SsTableBuilder};
+use crate::table::SsTableBuilder;
 use crate::table::{SsTable, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,7 +135,19 @@ impl LsmStorageInner {
         let snapshot = self.state.read().clone();
         match _task {
             CompactionTask::Leveled(leveled_compaction_task) => todo!(),
-            CompactionTask::Tiered(tiered_compaction_task) => todo!(),
+            CompactionTask::Tiered(tiered_compaction_task) => {
+                let mut iters = Vec::with_capacity(tiered_compaction_task.tiers.len());
+                for (tier_id, tier_tables) in &tiered_compaction_task.tiers {
+                    let ssts = tier_tables
+                        .iter()
+                        .map(|x| snapshot.sstables.get(x).unwrap().clone())
+                        .collect::<Vec<_>>();
+                    let concat_sst_iter = SstConcatIterator::create_and_seek_to_first(ssts)?;
+                    iters.push(Box::new(concat_sst_iter));
+                }
+                let merge_iter = MergeIterator::create(iters);
+                self.compact_by_iterator(merge_iter, tiered_compaction_task.bottom_tier_included)
+            }
             CompactionTask::Simple(simple_leveled_compaction_task) => {
                 let lower_level_ssts_id = &simple_leveled_compaction_task.lower_level_sst_ids;
                 let upper_level_ssts_id = &simple_leveled_compaction_task.upper_level_sst_ids;
@@ -278,8 +289,8 @@ impl LsmStorageInner {
     }
     fn force_full_compaction_inner(
         &self,
-        l0_sstables: &Vec<usize>,
-        l1_sstables: &Vec<usize>,
+        l0_sstables: &[usize],
+        l1_sstables: &[usize],
     ) -> Result<Vec<Arc<SsTable>>> {
         let iter = {
             let mut iters = Vec::with_capacity(l0_sstables.len() + l1_sstables.len());

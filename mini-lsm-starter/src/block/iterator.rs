@@ -18,7 +18,6 @@
 use std::sync::Arc;
 
 use bytes::Buf;
-use nom::{combinator::rest, ExtendInto};
 
 use crate::key::{KeySlice, KeyVec};
 
