@@ -227,14 +227,17 @@ impl LeveledCompactionController {
             .collect::<Vec<_>>();
         assert!(lower_level_sst_ids_set.is_empty());
         new_lower_level_ssts.extend(_output);
-        new_lower_level_ssts.sort_by(|x, y| {
-            snapshot
-                .sstables
-                .get(x)
-                .unwrap()
-                .first_key()
-                .cmp(snapshot.sstables.get(y).unwrap().first_key())
-        });
+        // NOTE: this is a change
+        if !_in_recovery {
+            new_lower_level_ssts.sort_by(|x, y| {
+                snapshot
+                    .sstables
+                    .get(x)
+                    .unwrap()
+                    .first_key()
+                    .cmp(snapshot.sstables.get(y).unwrap().first_key())
+            });
+        }
         snapshot.levels[_task.lower_level - 1].1 = new_lower_level_ssts;
         (snapshot, dels)
     }

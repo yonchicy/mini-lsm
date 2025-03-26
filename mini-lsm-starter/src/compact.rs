@@ -307,7 +307,7 @@ impl LsmStorageInner {
         let mut ids = Vec::new();
         let l1_tables: Vec<usize> = sstables.iter().map(|s| s.sst_id()).collect();
         {
-            let _state_lock = self.state_lock.lock();
+            let state_lock = self.state_lock.lock();
             let mut state = self.state.read().as_ref().clone();
             for sstable in l0_sstables.iter().chain(l1_sstables.iter()) {
                 let res = state.sstables.remove(sstable);
@@ -327,6 +327,11 @@ impl LsmStorageInner {
                 .collect::<Vec<_>>();
             assert!(l0_sstables_map.is_empty());
             *self.state.write() = Arc::new(state);
+            self.sync_dir()?;
+            self.manifest.as_ref().unwrap().add_record(
+                &state_lock,
+                crate::manifest::ManifestRecord::Compaction(task, ids.clone()),
+            )?;
         }
         for sst in l0_sstables.iter().chain(l1_sstables.iter()) {
             std::fs::remove_file(self.path_of_sst(*sst))?;
@@ -401,6 +406,10 @@ impl LsmStorageInner {
             *state = Arc::new(snapshot);
             drop(state);
             self.sync_dir()?;
+            self.manifest.as_ref().unwrap().add_record(
+                &lock,
+                crate::manifest::ManifestRecord::Compaction(task, output.clone()),
+            )?;
             sst_to_remove
         };
         println!(
