@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 // REMOVE THIS LINE after fully implementing this functionality
-// Copyright (c) 2022-2025 Alex Chi Z
-//
+// Copyright (c) 2022-2025 Alex Chi Z //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,13 +15,13 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use std::fs::File;
-use std::io::BufWriter;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
-use bytes::Bytes;
+use anyhow::{Context, Result};
+use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 
@@ -32,15 +31,58 @@ pub struct Wal {
 
 impl Wal {
     pub fn create(_path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+        Ok(Self {
+            file: Arc::new(Mutex::new(BufWriter::new(
+                OpenOptions::new()
+                    .read(true)
+                    .create_new(true)
+                    .write(true)
+                    .open(_path)
+                    .context(format!("failed to create wal file",))?,
+            ))),
+        })
     }
 
     pub fn recover(_path: impl AsRef<Path>, _skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
-        unimplemented!()
+        let path = _path.as_ref();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(path)
+            .context("failed to recover from wal file")?;
+        let mut buf = Vec::new();
+
+        file.read_to_end(&mut buf);
+        let mut buf_ptr = buf.as_slice();
+        while buf_ptr.has_remaining() {
+            let key_len = buf_ptr.get_u16() as usize;
+            let key = Bytes::copy_from_slice(&buf_ptr[..key_len]);
+            buf_ptr.advance(key_len);
+
+            let val_len = buf_ptr.get_u16() as usize;
+            let val = Bytes::copy_from_slice(&buf_ptr[..val_len]);
+            buf_ptr.advance(val_len);
+            _skiplist.insert(key, val);
+        }
+        Ok(Self {
+            file: Arc::new(Mutex::new(BufWriter::new(file))),
+        })
     }
 
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+        let key_len = _key.len();
+        let val_len = _value.len();
+        let mut buf =
+            Vec::with_capacity(_key.len() + _value.len() + 2 * std::mem::size_of::<u16>());
+
+        buf.put_u16(key_len as u16);
+        buf.put_slice(_key);
+
+        buf.put_u16(val_len as u16);
+        buf.put_slice(_value);
+
+        self.file.lock().write_all(&buf)?;
+        Ok(())
     }
 
     /// Implement this in week 3, day 5.
@@ -49,6 +91,9 @@ impl Wal {
     }
 
     pub fn sync(&self) -> Result<()> {
-        unimplemented!()
+        let mut file = self.file.lock();
+        file.flush()?;
+        file.get_mut().sync_all()?;
+        Ok(())
     }
 }

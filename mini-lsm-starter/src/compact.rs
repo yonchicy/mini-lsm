@@ -388,7 +388,6 @@ impl LsmStorageInner {
         let output: Vec<usize> = tables.iter().map(|x| x.sst_id()).collect();
         let sst_to_remove = {
             let lock = self.state_lock.lock();
-            println!("get state_lock in copaction");
             let mut snapshot = self.state.read().as_ref().clone();
             for file_to_add in tables {
                 snapshot.sstables.insert(file_to_add.sst_id(), file_to_add);
@@ -451,11 +450,13 @@ impl LsmStorageInner {
     }
 
     fn trigger_flush(&self) -> Result<()> {
+        println!("flush thread ticking");
         let snapshot = {
             let guard = self.state.read();
             Arc::clone(&guard)
         };
         if snapshot.imm_memtables.len() + 1 > self.options.num_memtable_limit {
+            println!("flush thread triggered");
             self.force_flush_next_imm_memtable()?;
         }
         Ok(())
@@ -468,6 +469,7 @@ impl LsmStorageInner {
         let this = self.clone();
         let handle = std::thread::spawn(move || {
             let ticker = crossbeam_channel::tick(Duration::from_millis(50));
+            println!("try to spawn flush thread");
             loop {
                 crossbeam_channel::select! {
                     recv(ticker) -> _ => if let Err(e) = this.trigger_flush() {
