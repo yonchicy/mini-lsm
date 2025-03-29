@@ -43,7 +43,9 @@ impl Block {
         buf.get_u16();
         let key_len = buf.get_u16() as usize;
         let key = &buf[..key_len];
-        KeyVec::from_vec(key.to_vec())
+        buf.advance(key_len);
+        let ts = buf.get_u64();
+        KeyVec::from_vec_with_ts(key.to_vec(), ts)
     }
 }
 
@@ -110,14 +112,16 @@ impl BlockIterator {
         let key_len = entry.get_u16() as usize;
         let rest_key = entry[..key_len].to_vec();
         entry.advance(key_len);
-
-        let key = &self.first_key.raw_ref()[..over_lap_size];
+        let ts = entry.get_u64();
+        let first_key_overlap = &self.first_key.key_ref()[..over_lap_size];
         self.key.clear();
-        self.key.append(key);
+        self.key.append(first_key_overlap);
         self.key.append(&rest_key);
+        self.key.set_ts(ts);
 
         let value_len = entry.get_u16() as usize;
-        let value_offset_begin = offset + 3 * std::mem::size_of::<u16>() + key_len;
+        let value_offset_begin =
+            offset + 3 * std::mem::size_of::<u16>() + std::mem::size_of::<u64>() + key_len;
         let value_offset_end = value_offset_begin + value_len;
         self.value_range = (value_offset_begin, value_offset_end);
     }

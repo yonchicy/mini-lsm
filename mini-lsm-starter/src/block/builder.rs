@@ -1,7 +1,6 @@
 // Copyright (c) 2022-2025 Alex Chi Z
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
+// Licensed under the Apache License, Version 2.0 (the "License"); // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
@@ -34,8 +33,8 @@ pub struct BlockBuilder {
 }
 
 fn compute_overlap(first_key: &KeyVec, key: &KeySlice) -> usize {
-    let first_key = first_key.raw_ref();
-    let target_key = key.raw_ref();
+    let first_key = first_key.key_ref();
+    let target_key = key.key_ref();
     let mut i = 0;
 
     loop {
@@ -67,7 +66,8 @@ impl BlockBuilder {
     /// Adds a key-value pair to the block. Returns false when the block is full.
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
-        if self.size() + key.len() + value.len() + 3 * std::mem::size_of::<u16>() > self.block_size
+        if self.size() + key.raw_len() + value.len() + 3 * std::mem::size_of::<u16>()
+            > self.block_size
             && !self.is_empty()
         {
             return false;
@@ -76,9 +76,10 @@ impl BlockBuilder {
         self.offsets.push(self.data.len() as u16);
         let over_lap_size = compute_overlap(first_key, &key);
         self.data.put_u16(over_lap_size as u16);
-        self.data.put_u16((key.len() - over_lap_size) as u16);
+        self.data.put_u16((key.key_len() - over_lap_size) as u16);
 
-        self.data.put(&key.raw_ref()[over_lap_size..]);
+        self.data.put(&key.key_ref()[over_lap_size..]);
+        self.data.put_u64(key.ts());
         self.data.put_u16(value.len() as u16);
         self.data.put(value);
         if first_key.is_empty() {

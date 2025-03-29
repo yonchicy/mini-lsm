@@ -58,8 +58,8 @@ impl LsmIterator {
             return Ok(());
         }
         match self.end_bound.as_ref() {
-            Bound::Included(b) => self.is_valid = self.inner.key().raw_ref() <= b,
-            Bound::Excluded(b) => self.is_valid = self.inner.key().raw_ref() < b,
+            Bound::Included(b) => self.is_valid = self.inner.key().key_ref() <= b,
+            Bound::Excluded(b) => self.is_valid = self.inner.key().key_ref() < b,
             Bound::Unbounded => {}
         }
         Ok(())
@@ -80,7 +80,7 @@ impl StorageIterator for LsmIterator {
     }
 
     fn key(&self) -> &[u8] {
-        self.inner.key().raw_ref()
+        self.inner.key().key_ref()
     }
 
     fn value(&self) -> &[u8] {

@@ -93,7 +93,7 @@ impl SstConcatIterator {
     pub fn create_and_seek_to_key(sstables: Vec<Arc<SsTable>>, key: KeySlice) -> Result<Self> {
         Self::check_sst_valid(&sstables);
         let idx = sstables
-            .partition_point(|x| x.first_key().raw_ref() <= key.raw_ref())
+            .partition_point(|x| x.first_key().as_key_slice() <= key)
             .saturating_sub(1);
         if idx >= sstables.len() {
             Ok(Self {
