@@ -15,12 +15,14 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use core::hash;
 use std::fs::{File, OpenOptions};
+use std::hash::Hasher;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
@@ -55,13 +57,23 @@ impl Wal {
         file.read_to_end(&mut buf);
         let mut buf_ptr = buf.as_slice();
         while buf_ptr.has_remaining() {
+            let mut hasher = crc32fast::Hasher::new();
             let key_len = buf_ptr.get_u16() as usize;
+            hasher.write_u16(key_len as u16);
+
             let key = Bytes::copy_from_slice(&buf_ptr[..key_len]);
+            hasher.write(&key);
             buf_ptr.advance(key_len);
 
             let val_len = buf_ptr.get_u16() as usize;
+            hasher.write_u16(val_len as u16);
             let val = Bytes::copy_from_slice(&buf_ptr[..val_len]);
+            hasher.write(&val);
             buf_ptr.advance(val_len);
+            let checksum = buf_ptr.get_u32();
+            if checksum != hasher.finalize() {
+                bail!("wal file checksum mismatch");
+            }
             _skiplist.insert(key, val);
         }
         Ok(Self {
@@ -72,15 +84,23 @@ impl Wal {
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
         let key_len = _key.len();
         let val_len = _value.len();
-        let mut buf =
-            Vec::with_capacity(_key.len() + _value.len() + 2 * std::mem::size_of::<u16>());
+        let mut buf = Vec::with_capacity(
+            _key.len() + _value.len() + 2 * std::mem::size_of::<u16>() + std::mem::size_of::<u32>(),
+        );
 
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.write_u16(key_len as u16);
         buf.put_u16(key_len as u16);
+
+        hasher.write(_key);
         buf.put_slice(_key);
 
+        hasher.write_u16(val_len as u16);
         buf.put_u16(val_len as u16);
-        buf.put_slice(_value);
 
+        hasher.write(_value);
+        buf.put_slice(_value);
+        buf.put_u32(hasher.finalize());
         self.file.lock().write_all(&buf)?;
         Ok(())
     }

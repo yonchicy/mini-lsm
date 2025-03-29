@@ -81,7 +81,10 @@ impl SsTableBuilder {
             first_key: KeyVec::from_vec(std::mem::take(&mut self.first_key)).into_key_bytes(),
             last_key: KeyVec::from_vec(std::mem::take(&mut self.last_key)).into_key_bytes(),
         });
+        let check_sum = crc32fast::hash(&encoded_block);
         self.data.extend(encoded_block);
+        self.data.put_u32(check_sum);
+
         self.first_key.clear();
         self.last_key.clear();
     }

@@ -21,7 +21,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::{fs::File, io::Read};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use bytes::{Buf, BufMut};
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
@@ -60,14 +61,20 @@ impl Manifest {
             .context("failed to open manifest")?;
         let mut buf: Vec<u8> = Vec::new();
         file.read_to_end(&mut buf)?;
-        let buf_ptr = buf.as_slice();
+        let mut buf_ptr = buf.as_slice();
         let mut records = Vec::new();
-
-        let stream = serde_json::Deserializer::from_slice(buf_ptr).into_iter::<ManifestRecord>();
-
-        for record in stream {
-            records.push(record?);
+        while buf_ptr.has_remaining() {
+            let len = buf_ptr.get_u64();
+            let slice = &buf_ptr[..len as usize];
+            let record = serde_json::from_slice::<ManifestRecord>(slice)?;
+            buf_ptr.advance(len as usize);
+            let checksum = buf_ptr.get_u32();
+            if checksum != crc32fast::hash(slice) {
+                bail!("manifest checksum mismatched!");
+            }
+            records.push(record);
         }
+
         Ok((
             Manifest {
                 file: Arc::new(Mutex::new(file)),
@@ -86,9 +93,12 @@ impl Manifest {
 
     pub fn add_record_when_init(&self, _record: ManifestRecord) -> Result<()> {
         let mut file = self.file.lock();
-        let buf = serde_json::to_vec(&_record)?;
-        // file.write_all(&(buf.len() as u64).to_be_bytes())?;
+        let mut buf = serde_json::to_vec(&_record)?;
+        let hash = crc32fast::hash(&buf);
+        file.write_all(&(buf.len() as u64).to_be_bytes())?;
+        buf.put_u32(hash);
         file.write_all(&buf)?;
+
         file.sync_all()?;
         Ok(())
     }

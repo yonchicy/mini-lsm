@@ -526,38 +526,53 @@ impl LsmStorageInner {
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
     pub fn write_batch<T: AsRef<[u8]>>(&self, _batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        unimplemented!()
-    }
-
-    /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        let size = {
-            let state = self.state.read();
-            state.memtable.put(_key, _value)?;
-            state.memtable.approximate_size()
-        };
-        if size > self.options.target_sst_size {
-            let lock = self.state_lock.lock();
-            let state = self.state.read();
-            if state.memtable.approximate_size() > self.options.target_sst_size {
-                drop(state);
-                self.force_freeze_memtable(&lock)?;
+        for record in _batch {
+            match record {
+                WriteBatchRecord::Put(key, value) => {
+                    let _key = key.as_ref();
+                    let _value = value.as_ref();
+                    let size = {
+                        let state = self.state.read();
+                        state.memtable.put(_key, _value)?;
+                        state.memtable.approximate_size()
+                    };
+                    if size > self.options.target_sst_size {
+                        let lock = self.state_lock.lock();
+                        let state = self.state.read();
+                        if state.memtable.approximate_size() > self.options.target_sst_size {
+                            drop(state);
+                            self.force_freeze_memtable(&lock)?;
+                        }
+                    }
+                }
+                WriteBatchRecord::Del(key) => {
+                    let _key = key.as_ref();
+                    let state = self.state.read();
+                    state.memtable.put(_key, b"")?;
+                    if state.memtable.approximate_size() > self.options.target_sst_size {
+                        let lock = self.state_lock.lock();
+                        if state.memtable.approximate_size() > self.options.target_sst_size {
+                            drop(state);
+                            self.force_freeze_memtable(&lock)?;
+                        }
+                    }
+                }
             }
         }
         Ok(())
     }
 
+    /// Put a key-value pair into the storage by writing into the current memtable.
+    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
+        let record = WriteBatchRecord::Put(_key, _value);
+        self.write_batch(&[record])?;
+        Ok(())
+    }
+
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        let state = self.state.read();
-        state.memtable.put(_key, b"")?;
-        if state.memtable.approximate_size() > self.options.target_sst_size {
-            let lock = self.state_lock.lock();
-            if state.memtable.approximate_size() > self.options.target_sst_size {
-                drop(state);
-                self.force_freeze_memtable(&lock)?;
-            }
-        }
+        let record = WriteBatchRecord::Del(_key);
+        self.write_batch(&[record])?;
         Ok(())
     }
 
