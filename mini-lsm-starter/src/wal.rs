@@ -55,7 +55,7 @@ impl Wal {
             .context("failed to recover from wal file")?;
         let mut buf = Vec::new();
 
-        file.read_to_end(&mut buf);
+        file.read_to_end(&mut buf)?;
         let mut buf_ptr = buf.as_slice();
         while buf_ptr.has_remaining() {
             let mut hasher = crc32fast::Hasher::new();
@@ -68,6 +68,7 @@ impl Wal {
 
             let ts = buf_ptr.get_u64();
             hasher.write_u64(ts);
+
             let val_len = buf_ptr.get_u16() as usize;
             hasher.write_u16(val_len as u16);
             let val = Bytes::copy_from_slice(&buf_ptr[..val_len]);

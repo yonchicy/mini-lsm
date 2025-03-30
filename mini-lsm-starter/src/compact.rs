@@ -20,6 +20,7 @@ mod simple_leveled;
 mod tiered;
 
 use anyhow::{anyhow, Ok};
+use nom::character::is_alphabetic;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -252,23 +253,24 @@ impl LsmStorageInner {
     fn compact_by_iterator(
         &self,
         mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
-        is_bottom: bool,
+        _is_bottom: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
         let mut table_builder = Some(SsTableBuilder::new(self.options.block_size));
         let mut compacted_tables = Vec::new();
+        let mut pre_key: Vec<u8> = Vec::new();
         while iter.is_valid() {
             if table_builder.is_none() {
                 table_builder = Some(SsTableBuilder::new(self.options.block_size));
             }
+            // if _is_bottom {
+            //     if !iter.value().is_empty() {
+            //         builder.add(iter.key(), iter.value());
+            //     }
+            // } else {
+            // }
             let builder = table_builder.as_mut().unwrap();
-            if is_bottom {
-                if !iter.value().is_empty() {
-                    builder.add(iter.key(), iter.value());
-                }
-            } else {
-                builder.add(iter.key(), iter.value());
-            }
-            if builder.estimated_size() > self.options.target_sst_size {
+            let is_same_key = iter.key().key_ref() == pre_key;
+            if builder.estimated_size() > self.options.target_sst_size && !is_same_key {
                 let id = self.next_sst_id();
                 let builder = table_builder.take().unwrap();
                 compacted_tables.push(Arc::new(builder.build(
@@ -276,7 +278,13 @@ impl LsmStorageInner {
                     Some(self.block_cache.clone()),
                     self.path_of_sst(id),
                 )?));
-                table_builder.take();
+                table_builder = Some(SsTableBuilder::new(self.options.block_size));
+            }
+            let builder = table_builder.as_mut().unwrap();
+            builder.add(iter.key(), iter.value());
+            if !is_same_key {
+                pre_key.clear();
+                pre_key.extend(iter.key().key_ref());
             }
             iter.next()?;
         }
