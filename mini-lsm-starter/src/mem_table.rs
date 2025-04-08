@@ -35,7 +35,7 @@ use ouroboros::self_referencing;
 /// An initial implementation of memtable is part of week 1, day 1. It will be incrementally implemented in other
 /// chapters of week 1 and week 2.
 pub struct MemTable {
-    map: Arc<SkipMap<KeyBytes, Bytes>>,
+    pub(crate) map: Arc<SkipMap<KeyBytes, Bytes>>,
     wal: Option<Wal>,
     id: usize,
     approximate_size: Arc<AtomicUsize>,
@@ -86,7 +86,7 @@ impl MemTable {
 
     /// Create a new mem-table with WAL
     pub fn create_with_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
-        println!("Creating memtable with WAL at {:?}", _path.as_ref());
+        // println!("Creating memtable with WAL at {:?}", _path.as_ref());
         Ok(Self {
             map: Arc::new(SkipMap::new()),
             wal: Some(Wal::create(_path.as_ref())?),

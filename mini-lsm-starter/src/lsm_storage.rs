@@ -15,7 +15,7 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::collections::{BTreeSet, HashMap};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
@@ -38,6 +38,7 @@ use crate::key::{KeyBytes, KeySlice, TS_DEFAULT, TS_RANGE_BEGIN, TS_RANGE_END};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{map_bound, map_key_bound_plus_ts, MemTable, MemTableIterator};
+use crate::mvcc::txn::{Transaction, TxnIterator};
 use crate::mvcc::LsmMvccInner;
 use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 
@@ -67,6 +68,16 @@ pub enum WriteBatchRecord<T: AsRef<[u8]>> {
 impl LsmStorageState {
     pub fn dump_structure(&self) {
         println!("lsm storage state dumping");
+        let imm_mem_table_ids = self
+            .imm_memtables
+            .iter()
+            .map(|x| x.id())
+            .collect::<Vec<_>>();
+        println!(
+            "immutable mem table ({}): {:?}",
+            imm_mem_table_ids.len(),
+            imm_mem_table_ids
+        );
         if !self.l0_sstables.is_empty() {
             println!("L0 ({}): {:?}", self.l0_sstables.len(), self.l0_sstables,);
         }
@@ -228,7 +239,6 @@ impl MiniLsm {
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
     /// not exist.
     pub fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Arc<Self>> {
-        println!("open options {:?}", options);
         let inner = Arc::new(LsmStorageInner::open(path, options)?);
         let (tx1, rx) = crossbeam_channel::unbounded();
         let compaction_thread = inner.spawn_compaction_thread(rx)?;
@@ -243,7 +253,7 @@ impl MiniLsm {
         }))
     }
 
-    pub fn new_txn(&self) -> Result<()> {
+    pub fn new_txn(&self) -> Result<Arc<Transaction>> {
         self.inner.new_txn()
     }
 
@@ -271,11 +281,7 @@ impl MiniLsm {
         self.inner.sync()
     }
 
-    pub fn scan(
-        &self,
-        lower: Bound<&[u8]>,
-        upper: Bound<&[u8]>,
-    ) -> Result<FusedIterator<LsmIterator>> {
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
         self.inner.scan(lower, upper)
     }
 
@@ -312,12 +318,12 @@ impl LsmStorageInner {
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
-        let mvcc = LsmMvccInner::new(0);
         let path = path.as_ref();
         if !path.exists() {
             std::fs::create_dir(path)?;
         }
         let mut state = LsmStorageState::create(&options);
+        let mut max_ts = 0;
         // NOTE: 因为自带了一个 id = 0 的  memtable
         let mut next_sst_id = 1;
         let block_cache = Arc::new(BlockCache::new(1024));
@@ -394,6 +400,7 @@ impl LsmStorageInner {
                     FileObject::open(&Self::path_of_sst_static(path, table_id))
                         .with_context(|| format!("failed to open SST: {}", table_id))?,
                 )?;
+                max_ts = max_ts.max(sst.max_ts());
                 state.sstables.insert(table_id, Arc::new(sst));
                 sst_cnt += 1;
             }
@@ -419,6 +426,13 @@ impl LsmStorageInner {
                 for id in memtables.iter() {
                     let memtable =
                         MemTable::recover_from_wal(*id, Self::path_of_wal_static(path, *id))?;
+                    let mem_max_ts = memtable
+                        .map
+                        .iter()
+                        .map(|x| x.key().ts())
+                        .max()
+                        .unwrap_or_default();
+                    max_ts = mem_max_ts.max(max_ts);
                     if !memtable.is_empty() {
                         state.imm_memtables.insert(0, Arc::new(memtable));
                         wal_cnt += 1;
@@ -438,8 +452,11 @@ impl LsmStorageInner {
             m.add_record_when_init(ManifestRecord::NewMemtable(state.memtable.id()))?;
             next_sst_id += 1;
             manifest = m;
+            println!("state from recovery");
+            state.dump_structure();
         }
 
+        let mvcc = LsmMvccInner::new(max_ts);
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
@@ -452,7 +469,6 @@ impl LsmStorageInner {
             mvcc: Some(mvcc),
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
         };
-
         Ok(storage)
     }
 
@@ -465,8 +481,7 @@ impl LsmStorageInner {
         compaction_filters.push(compaction_filter);
     }
 
-    /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
+    pub fn get_with_ts(&self, _key: &[u8], read_ts: u64) -> Result<Option<Bytes>> {
         let snapshot = {
             let guard = self.state.read();
             Arc::clone(&guard)
@@ -532,6 +547,7 @@ impl LsmStorageInner {
                 MergeIterator::create(levels_concat_iters),
             )?,
             Bound::Unbounded,
+            read_ts,
         )?;
 
         // FIXME:  目前只匹配了 key ， 没匹配 timestap
@@ -539,6 +555,12 @@ impl LsmStorageInner {
             return Ok(Some(Bytes::copy_from_slice(iter.value())));
         }
         Ok(None)
+    }
+
+    /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
+    pub fn get(self: &Arc<Self>, _key: &[u8]) -> Result<Option<Bytes>> {
+        let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
+        txn.get(_key)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -629,15 +651,15 @@ impl LsmStorageInner {
             .iter()
             .map(|x| x.id())
             .collect::<Vec<_>>();
-        println!(
-            "after freezing mem table ,snapshot imm_memtables {:?}",
-            snapshot_id
-        );
+        // println!(
+        //     "after freezing mem table ,snapshot imm_memtables {:?}",
+        //     snapshot_id
+        // );
         // Update the snapshot.
         *guard = Arc::new(snapshot);
 
         drop(guard);
-        println!("freezing memtable to wal with id {}", old_memtable.id());
+        // println!("freezing memtable to wal with id {}", old_memtable.id());
         old_memtable.sync_wal()?;
 
         Ok(())
@@ -712,9 +734,8 @@ impl LsmStorageInner {
         Ok(())
     }
 
-    pub fn new_txn(&self) -> Result<()> {
-        // no-op
-        Ok(())
+    pub fn new_txn(self: &Arc<Self>) -> Result<Arc<Transaction>> {
+        Ok(self.mvcc().new_txn(self.clone(), self.options.serializable))
     }
     fn key_within(user_key: &[u8], table_begin: &KeyBytes, table_end: &KeyBytes) -> bool {
         table_begin.key_ref() <= user_key && user_key <= table_end.key_ref()
@@ -746,11 +767,12 @@ impl LsmStorageInner {
         }
         true
     }
-    /// Create an iterator over a range of keys.
-    pub fn scan(
-        &self,
+
+    pub fn scan_with_ts(
+        self: &Arc<Self>,
         _lower: Bound<&[u8]>,
         _upper: Bound<&[u8]>,
+        read_ts: u64,
     ) -> Result<FusedIterator<LsmIterator>> {
         let snapshot = {
             let guard = self.state.read();
@@ -766,7 +788,12 @@ impl LsmStorageInner {
             memtable_iters.push(Box::new(memtable.scan(lower, upper)));
         }
 
-        let mem_iterator = MergeIterator::create(memtable_iters);
+        let mut mem_iterator = MergeIterator::create(memtable_iters);
+        if let Bound::Excluded(key) = _lower {
+            while mem_iterator.is_valid() && mem_iterator.key().key_ref() == key {
+                mem_iterator.next()?;
+            }
+        }
 
         let mut l0_sstable_iters: Vec<Box<SsTableIterator>> =
             Vec::with_capacity(snapshot.l0_sstables.len());
@@ -787,7 +814,7 @@ impl LsmStorageInner {
                         let k = KeySlice::from_slice(key, TS_RANGE_BEGIN);
                         let mut iter = SsTableIterator::create_and_seek_to_key(sst, k)?;
                         // 这里
-                        if iter.is_valid() && iter.key().key_ref() == key {
+                        while iter.is_valid() && iter.key().key_ref() == key {
                             iter.next()?;
                         }
                         iter
@@ -826,7 +853,7 @@ impl LsmStorageInner {
                         ssts,
                         KeySlice::from_slice(key, TS_DEFAULT),
                     )?;
-                    if iter.is_valid() && iter.key().key_ref() == key {
+                    while iter.is_valid() && iter.key().key_ref() == key {
                         iter.next()?;
                     }
                     iter
@@ -838,10 +865,18 @@ impl LsmStorageInner {
 
         let lsm_iter_inner =
             TwoMergeIterator::create(mem_l0_iter, MergeIterator::create(levels_concat_iters))?;
-        let lsm_iterator = LsmIterator::new(lsm_iter_inner, map_bound(_upper))?;
+        let lsm_iterator = LsmIterator::new(lsm_iter_inner, map_bound(_upper), read_ts)?;
 
         let fused_iterator = FusedIterator::new(lsm_iterator);
-
         Ok(fused_iterator)
+    }
+    /// Create an iterator over a range of keys.
+    pub fn scan(
+        self: &Arc<Self>,
+        _lower: Bound<&[u8]>,
+        _upper: Bound<&[u8]>,
+    ) -> Result<TxnIterator> {
+        let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
+        txn.scan(_lower, _upper)
     }
 }

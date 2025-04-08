@@ -41,7 +41,7 @@ impl Wal {
                     .create_new(true)
                     .write(true)
                     .open(_path)
-                    .context(format!("failed to create wal file",))?,
+                    .context(format!("failed to create wal file"))?,
             ))),
         })
     }
@@ -60,17 +60,17 @@ impl Wal {
         while buf_ptr.has_remaining() {
             let mut hasher = crc32fast::Hasher::new();
             let key_len = buf_ptr.get_u16() as usize;
-            hasher.write_u16(key_len as u16);
+            hasher.write(&(key_len as u16).to_be_bytes());
 
             let key = Bytes::copy_from_slice(&buf_ptr[..key_len]);
             hasher.write(&key);
             buf_ptr.advance(key_len);
 
             let ts = buf_ptr.get_u64();
-            hasher.write_u64(ts);
+            hasher.write(&(ts).to_be_bytes());
 
             let val_len = buf_ptr.get_u16() as usize;
-            hasher.write_u16(val_len as u16);
+            hasher.write(&(val_len as u16).to_be_bytes());
             let val = Bytes::copy_from_slice(&buf_ptr[..val_len]);
             hasher.write(&val);
             buf_ptr.advance(val_len);
@@ -78,6 +78,12 @@ impl Wal {
             if checksum != hasher.finalize() {
                 bail!("wal file checksum mismatch");
             }
+            // println!(
+            //     "recoverying memtable {:?} with kv ({:?},{:?})",
+            //     _path.as_ref(),
+            //     key,
+            //     val
+            // );
             _skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), val);
         }
         Ok(Self {
@@ -92,7 +98,7 @@ impl Wal {
             _key.raw_len()
                 + _value.len()
                 + 2 * std::mem::size_of::<u16>()
-                + std::mem::size_of::<u32>(),
+                + std::mem::size_of::<u64>(),
         );
         buf.put_u16(key_len as u16);
         buf.put_slice(_key.key_ref());

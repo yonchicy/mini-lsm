@@ -40,30 +40,36 @@ pub struct LsmIterator {
     end_bound: Bound<Bytes>,
     pre_key: Vec<u8>,
     is_valid: bool,
+    ts: u64,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner, end_bound: Bound<Bytes>) -> Result<Self> {
+    pub(crate) fn new(iter: LsmIteratorInner, end_bound: Bound<Bytes>, ts: u64) -> Result<Self> {
         let mut ret = Self {
             is_valid: iter.is_valid(),
             inner: iter,
             end_bound,
             pre_key: Vec::new(),
+            ts,
         };
         ret.move_to_next_key()?;
         Ok(ret)
     }
-    fn next_inner(&mut self) -> Result<()> {
-        self.inner.next()?;
+    fn check_valid(&mut self) -> bool {
         if !self.inner.is_valid() {
             self.is_valid = false;
-            return Ok(());
+            return false;
         }
         match self.end_bound.as_ref() {
             Bound::Included(b) => self.is_valid = self.inner.key().key_ref() <= b,
             Bound::Excluded(b) => self.is_valid = self.inner.key().key_ref() < b,
             Bound::Unbounded => {}
         }
+        self.is_valid
+    }
+    fn next_inner(&mut self) -> Result<()> {
+        self.inner.next()?;
+        self.check_valid();
         Ok(())
     }
     fn move_to_next_key(&mut self) -> Result<()> {
@@ -71,12 +77,25 @@ impl LsmIterator {
             while self.inner.is_valid() && self.inner.key().key_ref() == self.pre_key {
                 self.next_inner()?;
             }
-            if !self.inner.is_valid() {
-                self.is_valid = false;
+            if !self.check_valid() {
                 break;
             }
             self.pre_key.clear();
             self.pre_key.extend(self.inner.key().key_ref());
+
+            while self.inner.is_valid()
+                && self.inner.key().key_ref() == self.pre_key
+                && self.inner.key().ts() > self.ts
+            {
+                self.next_inner()?;
+            }
+            if !self.check_valid() {
+                break;
+            }
+            if self.inner.key().key_ref() != self.pre_key {
+                continue;
+            }
+
             if !self.inner.value().is_empty() {
                 break;
             }

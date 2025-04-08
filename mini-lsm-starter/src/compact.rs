@@ -20,7 +20,6 @@ mod simple_leveled;
 mod tiered;
 
 use anyhow::{anyhow, Ok};
-use nom::character::is_alphabetic;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
