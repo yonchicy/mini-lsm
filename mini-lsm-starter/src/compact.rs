@@ -252,23 +252,41 @@ impl LsmStorageInner {
     fn compact_by_iterator(
         &self,
         mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
-        _is_bottom: bool,
+        is_bottom: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
         let mut table_builder = Some(SsTableBuilder::new(self.options.block_size));
         let mut compacted_tables = Vec::new();
         let mut pre_key: Vec<u8> = Vec::new();
+        let watermark = self.mvcc().watermark();
+        let mut first_key_below_watermark = false;
         while iter.is_valid() {
             if table_builder.is_none() {
                 table_builder = Some(SsTableBuilder::new(self.options.block_size));
             }
-            // if _is_bottom {
-            //     if !iter.value().is_empty() {
-            //         builder.add(iter.key(), iter.value());
-            //     }
-            // } else {
-            // }
+
             let builder = table_builder.as_mut().unwrap();
+            // 为了让相同的 key 放到同一个 sst 里
             let is_same_key = iter.key().key_ref() == pre_key;
+            if !is_same_key {
+                first_key_below_watermark = true;
+            }
+
+            if is_bottom && !is_same_key && iter.key().ts() <= watermark && iter.value().is_empty()
+            {
+                pre_key.clear();
+                pre_key.extend(iter.key().key_ref());
+                iter.next()?;
+                first_key_below_watermark = false;
+                continue;
+            }
+            if iter.key().ts() <= watermark {
+                if is_same_key && !first_key_below_watermark {
+                    iter.next()?;
+                    continue;
+                }
+                first_key_below_watermark = false;
+            }
+
             if builder.estimated_size() > self.options.target_sst_size && !is_same_key {
                 let id = self.next_sst_id();
                 let builder = table_builder.take().unwrap();

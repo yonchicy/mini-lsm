@@ -33,7 +33,7 @@ use parking_lot::Mutex;
 use crate::{
     iterators::{two_merge_iterator::TwoMergeIterator, StorageIterator},
     lsm_iterator::{FusedIterator, LsmIterator},
-    lsm_storage::LsmStorageInner,
+    lsm_storage::{LsmStorageInner, WriteBatchRecord},
     mem_table::map_bound,
 };
 
@@ -48,10 +48,20 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        self.check_commited();
+        if let Some(val) = self.local_storage.get(key).map(|v| v.value().clone()) {
+            if val.is_empty() {
+                return Ok(None);
+            } else {
+                return Ok(Some(val));
+            }
+        }
+
         self.inner.get_with_ts(key, self.read_ts)
     }
 
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
+        self.check_commited();
         let mut local_iter = TxnLocalIterator::new(
             self.local_storage.clone(),
             |map| map.range((map_bound(lower), map_bound(upper))),
@@ -69,28 +79,46 @@ impl Transaction {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
-        if self.committed.load(Ordering::SeqCst) {
-            panic!("canot operate on committed txn!");
-        }
+        self.check_commited();
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
     }
 
     pub fn delete(&self, key: &[u8]) {
+        self.check_commited();
         let val = Bytes::new();
         self.put(key, &val);
+    }
+    fn check_commited(&self) {
+        if self.committed.load(Ordering::SeqCst) {
+            panic!("canot operate on committed txn!");
+        }
     }
 
     pub fn commit(&self) -> Result<()> {
         self.committed
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .expect("cannot operate on committed txn!");
+        let batch = self
+            .local_storage
+            .iter()
+            .map(|entry| {
+                if entry.value().is_empty() {
+                    WriteBatchRecord::Del(entry.key().clone())
+                } else {
+                    WriteBatchRecord::Put(entry.key().clone(), entry.value().clone())
+                }
+            })
+            .collect::<Vec<_>>();
+        self.inner.write_batch(&batch)?;
         Ok(())
     }
 }
 
 impl Drop for Transaction {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        self.inner.mvcc().ts.lock().1.remove_reader(self.read_ts);
+    }
 }
 
 type SkipMapRangeIter<'a> =

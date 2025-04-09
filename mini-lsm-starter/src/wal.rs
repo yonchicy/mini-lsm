@@ -12,8 +12,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::fs::{File, OpenOptions};
 use std::hash::Hasher;
@@ -41,7 +39,7 @@ impl Wal {
                     .create_new(true)
                     .write(true)
                     .open(_path)
-                    .context(format!("failed to create wal file"))?,
+                    .context("failed to create wal file")?,
             ))),
         })
     }
@@ -59,21 +57,26 @@ impl Wal {
         let mut buf_ptr = buf.as_slice();
         while buf_ptr.has_remaining() {
             let mut hasher = crc32fast::Hasher::new();
-            let key_len = buf_ptr.get_u16() as usize;
-            hasher.write(&(key_len as u16).to_be_bytes());
+            let batch_size = buf_ptr.get_u32();
+            hasher.write(&(batch_size).to_be_bytes());
+            for _ in 0..batch_size {
+                let key_len = buf_ptr.get_u16() as usize;
+                hasher.write(&(key_len as u16).to_be_bytes());
 
-            let key = Bytes::copy_from_slice(&buf_ptr[..key_len]);
-            hasher.write(&key);
-            buf_ptr.advance(key_len);
+                let key = Bytes::copy_from_slice(&buf_ptr[..key_len]);
+                hasher.write(&key);
+                buf_ptr.advance(key_len);
 
-            let ts = buf_ptr.get_u64();
-            hasher.write(&(ts).to_be_bytes());
+                let ts = buf_ptr.get_u64();
+                hasher.write(&(ts).to_be_bytes());
 
-            let val_len = buf_ptr.get_u16() as usize;
-            hasher.write(&(val_len as u16).to_be_bytes());
-            let val = Bytes::copy_from_slice(&buf_ptr[..val_len]);
-            hasher.write(&val);
-            buf_ptr.advance(val_len);
+                let val_len = buf_ptr.get_u16() as usize;
+                hasher.write(&(val_len as u16).to_be_bytes());
+                let val = Bytes::copy_from_slice(&buf_ptr[..val_len]);
+                hasher.write(&val);
+                buf_ptr.advance(val_len);
+                _skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), val);
+            }
             let checksum = buf_ptr.get_u32();
             if checksum != hasher.finalize() {
                 bail!("wal file checksum mismatch");
@@ -84,7 +87,6 @@ impl Wal {
             //     key,
             //     val
             // );
-            _skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), val);
         }
         Ok(Self {
             file: Arc::new(Mutex::new(BufWriter::new(file))),
@@ -92,28 +94,29 @@ impl Wal {
     }
 
     pub fn put(&self, _key: KeySlice, _value: &[u8]) -> Result<()> {
-        let key_len = _key.key_len();
-        let val_len = _value.len();
-        let mut buf = Vec::with_capacity(
-            _key.raw_len()
-                + _value.len()
-                + 2 * std::mem::size_of::<u16>()
-                + std::mem::size_of::<u64>(),
-        );
-        buf.put_u16(key_len as u16);
-        buf.put_slice(_key.key_ref());
-        buf.put_u64(_key.ts());
-        buf.put_u16(val_len as u16);
-        buf.put_slice(_value);
+        self.put_batch(&[(_key, _value)])
+    }
+    // |   HEADER   |                          BODY                                      |  FOOTER  |
+    // |     u32    |   u16   | var | u64 |    u16    |  var  |           ...            |    u32   |
+    // | batch_size | key_len | key | ts  | value_len | value | more key-value pairs ... | checksum |
+
+    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
+        let batch_size = _data.len() as u32;
+        let mut buf = Vec::<u8>::new();
+        buf.put_u32(batch_size);
+        for (_key, _value) in _data {
+            let key_len = _key.key_len();
+            let val_len = _value.len();
+            buf.put_u16(key_len as u16);
+            buf.put_slice(_key.key_ref());
+            buf.put_u64(_key.ts());
+            buf.put_u16(val_len as u16);
+            buf.put_slice(_value);
+        }
         let mut file = self.file.lock();
         file.write_all(&buf)?;
         file.write_all(&crc32fast::hash(&buf).to_be_bytes())?;
         Ok(())
-    }
-
-    /// Implement this in week 3, day 5.
-    pub fn put_batch(&self, _data: &[(&[u8], &[u8])]) -> Result<()> {
-        unimplemented!()
     }
 
     pub fn sync(&self) -> Result<()> {
