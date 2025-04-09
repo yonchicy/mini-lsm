@@ -562,9 +562,7 @@ impl LsmStorageInner {
         let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
         txn.get(_key)
     }
-
-    /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, _batch: &[WriteBatchRecord<T>]) -> Result<()> {
+    pub fn write_batch_inner<T: AsRef<[u8]>>(&self, _batch: &[WriteBatchRecord<T>]) -> Result<u64> {
         let mvcc = self.mvcc();
         let _lock = mvcc.write_lock.lock();
         let ts = mvcc.latest_commit_ts() + 1;
@@ -602,18 +600,42 @@ impl LsmStorageInner {
             }
         }
         mvcc.update_commit_ts(ts);
+        Ok(ts)
+    }
+
+    /// Write a batch of data into the storage. Implement in week 2 day 7.
+    pub fn write_batch<T: AsRef<[u8]>>(
+        self: &Arc<Self>,
+        _batch: &[WriteBatchRecord<T>],
+    ) -> Result<()> {
+        if !self.options.serializable {
+            let _ = self.write_batch_inner(_batch)?;
+        } else {
+            let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
+            for rec in _batch {
+                match rec {
+                    WriteBatchRecord::Put(k, v) => {
+                        txn.put(k.as_ref(), v.as_ref());
+                    }
+                    WriteBatchRecord::Del(k) => {
+                        txn.delete(k.as_ref());
+                    }
+                }
+            }
+            txn.commit()?;
+        }
         Ok(())
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        let record = WriteBatchRecord::Put(_key, _value);
+    pub fn put(self: &Arc<Self>, _key: &[u8], _value: &[u8]) -> Result<()> {
+        let record: WriteBatchRecord<&[u8]> = WriteBatchRecord::Put(_key, _value);
         self.write_batch(&[record])?;
         Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
-    pub fn delete(&self, _key: &[u8]) -> Result<()> {
+    pub fn delete(self: &Arc<Self>, _key: &[u8]) -> Result<()> {
         let record = WriteBatchRecord::Del(_key);
         self.write_batch(&[record])?;
         Ok(())
