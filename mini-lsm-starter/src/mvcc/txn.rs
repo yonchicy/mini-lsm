@@ -116,7 +116,7 @@ impl Transaction {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .expect("cannot operate on committed txn!");
 
-        let _ = self.inner.mvcc().commit_lock.lock();
+        let _lock = self.inner.mvcc().commit_lock.lock();
 
         let serializability_check;
 

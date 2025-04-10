@@ -259,7 +259,8 @@ impl LsmStorageInner {
         let mut pre_key: Vec<u8> = Vec::new();
         let watermark = self.mvcc().watermark();
         let mut first_key_below_watermark = false;
-        while iter.is_valid() {
+        let compaction_filters = self.compaction_filters.lock().clone();
+        'outer: while iter.is_valid() {
             if table_builder.is_none() {
                 table_builder = Some(SsTableBuilder::new(self.options.block_size));
             }
@@ -285,6 +286,19 @@ impl LsmStorageInner {
                     continue;
                 }
                 first_key_below_watermark = false;
+
+                if !compaction_filters.is_empty() {
+                    for filter in &compaction_filters {
+                        match filter {
+                            crate::lsm_storage::CompactionFilter::Prefix(x) => {
+                                if iter.key().key_ref().starts_with(x) {
+                                    iter.next()?;
+                                    continue 'outer;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             if builder.estimated_size() > self.options.target_sst_size && !is_same_key {
